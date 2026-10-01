@@ -1,7 +1,7 @@
 /**
 * Author: Alan Chen
 * Assignment: Simple 2D Scene
-* Date due: 08/05/2026
+* Date due: 10/05/2026
 *
 * I pledge that I have completed this assignment without
 * collaborating with anyone else, in conformance with the
@@ -29,15 +29,15 @@ constexpr Vector2 SCREEN_SIZE = {
 namespace SceneObject {
 
 // There can be only one of each scene object, and they're loaded in the order of declaration here.
-enum Type { TREES_BG, TREES_MG, TREES_FG, ROAD, SUN, CAR, UFO, LASER, EXPLOSION, COUNT };
+enum Type { SUN, TREES_BG, TREES_MG, TREES_FG, ROAD, CAR, UFO, LASER, EXPLOSION, COUNT };
 } // namespace SceneObject
 
 constexpr std::array<const char*, SceneObject::COUNT> TEXTURE_PATHS = {
+    "assets/sun.png",
     "assets/trees-background.png",
     "assets/trees-midground.png",
     "assets/trees-foreground.png",
     "assets/road.png",
-    "assets/sun.png",
     "assets/car.png",
     "assets/ufo.png",
     "assets/laser.png",
@@ -48,18 +48,23 @@ namespace Event {
 enum Type { DAY, NIGHT, UFO_ENTRANCE, UFO_EXIT, COUNT };
 }
 
-constexpr float EVENT_TIMESTAMPS[] = {0.0f, 3.0f, 4.0f, 10.0f};
-constexpr float EVENT_CYCLE_LENGTH = 12.0f;
+constexpr float EVENT_CYCLE_LENGTH = 17.0f;
+constexpr float EVENT_TIMESTAMPS[] = {0.0f, 5.0f, 8.0f, 14.0f, EVENT_CYCLE_LENGTH};
+
+constexpr Color DAY_BG_COLOR = SKYBLUE;
+constexpr Color SUNSET_BG_COLOR = ORANGE;
+constexpr Color NIGHT_BG_COLOR = BLACK;
 
 // =============================================================================
 // Object-specific constants
 // =============================================================================
 
 // Parallax backgrounds
+constexpr int32_t BACKGROUND_LAYER_COUNT = 4;
 constexpr float BACKGROUND_SCROLL_SPEEDS[] = {15.0f, 25.0f, 45.0f, 90.0f};
 constexpr float BACKGROUND_Y_OFFSET = 100.0f;
 
-constexpr float NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER = 3.0f;
+constexpr float NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER = 8.0f;
 
 // Road
 constexpr float ROAD_Y_OFFSET = 150.0f; // Added to the above background offset
@@ -68,13 +73,31 @@ constexpr float ROAD_SIZE_Y = 250.0f;
 // Sun
 constexpr Vector2 SUN_SIZE = {250.0f, 250.0f};
 constexpr float SUN_Y = 125.0f;
-constexpr float SUN_HIDDEN_Y = 750.0f;
+constexpr float SUN_HIDDEN_Y = 400.0f;
+constexpr float SUN_HIDDEN_SCALE = 0.25f;
+constexpr float SUN_LINGER_FRACTION = 0.5f; // Portion of the event spent sitting still
+
+// UFO
+constexpr float UFO_ACTIVE_X = 350.0f;
+constexpr float UFO_Y = 300.0f;
+constexpr float UFO_BASE_ANGLE = -15.0f;
+
+// Laser
+constexpr float LASER_TRAVEL_SEC = 0.6f;
+constexpr float LASER_FIRE_PROGRESS = 0.5f;
+
+// Explosion
+constexpr Vector2 EXPLOSION_SIZE = {200.0f, 200.0f};
+constexpr float EXPLOSION_MIN_SCALE = 0.5f;
+constexpr float EXPLOSION_MAX_SCALE = 2.0f;
+constexpr float EXPLOSION_LINGER_SEC = 0.85f;
 
 // =============================================================================
 // App-level globals
 // =============================================================================
 AppStatus gAppStatus = AppStatus::RUNNING;
 float gPreviousTimestampSec = 0.0f;
+Color gBackgroundColor = DAY_BG_COLOR;
 
 struct CurrentEvent {
     Event::Type id;
@@ -106,15 +129,24 @@ std::vector<Object> gObjects;
 float gBackgroundOffsets[] = {0.0f, 0.0f, 0.0f, 0.0f};
 float gBackgroundScrollSpeedMultiplier = 1.0f;
 
+bool gLaserFiredThisCycle = false; // Once-per-cycle guard
+bool gLaserInFlight = false; // Is the laser currently traveling to its target?
+float gLaserStartSec = 0.0f; // For lerping
+Vector2 gLaserTarget = {-1.0f, -1.0f};
+Vector2 gLaserOrigin = {0.0f, 0.0f};
+float gLaserAngle = 0.0f;
+
+bool gExplosionStarted = false;
+float gExplosionStartSec = 0.0f; // For lerping
+
 void initialize(void);
 void processInput(void);
-void updateCurrentEvent(float nowSec);
 void update(void);
 void render(void);
 void shutdown(void);
 
 void initialize(void) {
-    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "An Awesome Scene");
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Close Encounters of the Close Kind");
     SetTargetFPS(TARGET_FPS);
 
     // Load textures for all scene objects
@@ -157,15 +189,15 @@ void initialize(void) {
     // These objects start off the screen
     auto& ufo = gObjects[SceneObject::UFO];
     ufo.size = {0.5f * ufo.size.x, 0.5f * ufo.size.y};
-    ufo.position.x = -SCREEN_SIZE.x;
-    ufo.rotation = -15.0f;
+    ufo.position = {-SCREEN_SIZE.x, UFO_Y};
+    ufo.rotation = UFO_BASE_ANGLE;
 
     auto& laser = gObjects[SceneObject::LASER];
-    laser.size = {0.25f * laser.size.x, 0.25f * laser.size.y};
+    laser.size = {0.1f * laser.size.x, 0.15f * laser.size.y};
     laser.position.x = -SCREEN_SIZE.x;
 
     auto& explosion = gObjects[SceneObject::EXPLOSION];
-    explosion.size = {0.5f * explosion.size.x, 0.5f * explosion.size.y};
+    explosion.size = EXPLOSION_SIZE;
     explosion.position.x = -SCREEN_SIZE.x;
 }
 
@@ -189,6 +221,15 @@ void updateCurrentEvent(float nowSec) {
     }
 }
 
+// Lerps the size and position of the sun for a rising / setting effect
+// hiddenAmount = 1 => completely hidden and smallest
+// hiddenAmount = 0 => at its zenith
+void setSunHiddenAmount(Object& sun, float hiddenAmount) {
+    float scale = lerp(1.0f, SUN_HIDDEN_SCALE, hiddenAmount);
+    sun.position.y = lerp(SUN_Y, SUN_HIDDEN_Y, hiddenAmount);
+    sun.size = {SUN_SIZE.x * scale, SUN_SIZE.y * scale};
+}
+
 void update(void) {
     // Compute delta time
     float nowSec = static_cast<float>(GetTime());
@@ -197,9 +238,11 @@ void update(void) {
 
     // Parallax scroll
     for (int32_t i = SceneObject::TREES_BG; i <= SceneObject::ROAD; ++i) {
-        gBackgroundOffsets[i] +=
-            BACKGROUND_SCROLL_SPEEDS[i] * gBackgroundScrollSpeedMultiplier * deltaTime;
-        gObjects[i].uvOrigin.x = gBackgroundOffsets[i];
+        int32_t layer = i - SceneObject::TREES_BG;
+
+        gBackgroundOffsets[layer] +=
+            BACKGROUND_SCROLL_SPEEDS[layer] * gBackgroundScrollSpeedMultiplier * deltaTime;
+        gObjects[i].uvOrigin.x = gBackgroundOffsets[layer];
     }
 
     updateCurrentEvent(nowSec);
@@ -209,28 +252,76 @@ void update(void) {
     auto& ufo = gObjects[SceneObject::UFO];
 
     switch (gCurrentEvent.id) {
-        case (Event::NIGHT): {
-            sun.position.y = SUN_Y + (SUN_HIDDEN_Y - SUN_Y) * gCurrentEvent.progress;
+        case (Event::DAY): {
+            gLaserFiredThisCycle = false;
             gBackgroundScrollSpeedMultiplier = 1.0f;
+
+            // Begin sunset sequence
+            float t = (gCurrentEvent.progress - SUN_LINGER_FRACTION) / (1.0f - SUN_LINGER_FRACTION);
+            setSunHiddenAmount(sun, clamp(t, 0.0f, 1.0f));
+            gBackgroundColor = lerpColor(DAY_BG_COLOR, SUNSET_BG_COLOR, clamp(t, 0.0f, 1.0f));
+
+            break;
+        }
+        case (Event::NIGHT): {
+            setSunHiddenAmount(sun, 1.0f);
+
+            // Fade to black
+            gBackgroundColor = lerpColor(
+                SUNSET_BG_COLOR,
+                NIGHT_BG_COLOR,
+                clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f)
+            );
 
             break;
         }
         case (Event::UFO_ENTRANCE): {
-            gBackgroundScrollSpeedMultiplier = NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER;
-            sun.position.y = SUN_HIDDEN_Y;
+            // Ramp up scroll speed
+            gBackgroundScrollSpeedMultiplier = lerp(
+                1.0f,
+                NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER,
+                clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f)
+            );
+
+            // Move the UFO to firing position
+            ufo.position.x =
+                lerp(-ufo.size.x, UFO_ACTIVE_X, clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f));
+
+            // UFO's there; select a target and fire a laser
+            if (gCurrentEvent.progress > LASER_FIRE_PROGRESS && !gLaserFiredThisCycle) {
+                gLaserFiredThisCycle = true;
+                gLaserInFlight = true;
+                gLaserStartSec = nowSec;
+                gLaserTarget = {550.0f, car.position.y};
+                gLaserOrigin = {ufo.position.x, ufo.position.y};
+
+                gLaserAngle =
+                    std::atan2(gLaserTarget.y - gLaserOrigin.y, gLaserTarget.x - gLaserOrigin.x)
+                    * 180.0f / PI;
+            }
+
+            // Keep the sun hidden and the skies dark
+            setSunHiddenAmount(sun, 1.0f);
+            gBackgroundColor = NIGHT_BG_COLOR;
 
             break;
         }
         case (Event::UFO_EXIT): {
-            sun.position.y = SUN_HIDDEN_Y + (SUN_Y - SUN_HIDDEN_Y) * gCurrentEvent.progress;
+            // Ramp down scroll speed
+            gBackgroundScrollSpeedMultiplier = lerp(
+                NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER,
+                1.0f,
+                clamp(gCurrentEvent.progress, 0.0f, 1.0f)
+            );
 
-            break;
-        }
-        case (Event::DAY): {
-            gBackgroundScrollSpeedMultiplier = 1.0f;
+            // UFO flies off-screen
+            ufo.position.x =
+                lerp(UFO_ACTIVE_X, -ufo.size.x, clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f));
 
-            float sizeMultiplier = 1.0f + (0.25f - 1.0f) * gCurrentEvent.progress;
-            sun.size = {sizeMultiplier * sun.size.x, sizeMultiplier * sun.size.y};
+            // The sun rises and saves the day
+            float t = gCurrentEvent.progress / (1.0f - SUN_LINGER_FRACTION);
+            setSunHiddenAmount(sun, 1.0f - clamp(t, 0.0f, 1.0f));
+            gBackgroundColor = lerpColor(NIGHT_BG_COLOR, DAY_BG_COLOR, clamp(t, 0.0f, 1.0f));
 
             break;
         }
@@ -239,12 +330,53 @@ void update(void) {
     }
 
     car.position.x = SCREEN_CENTER.x + 10.0f * std::cos(nowSec * 2);
+    ufo.position.y = UFO_Y + 25.0f * std::cos(nowSec * 5);
+    ufo.rotation = UFO_BASE_ANGLE + 5.0f * std::sin(nowSec * 2);
+
+    auto& laser = gObjects[SceneObject::LASER];
+    auto& explosion = gObjects[SceneObject::EXPLOSION];
+
+    if (gLaserInFlight) {
+        float t = clamp((nowSec - gLaserStartSec) / LASER_TRAVEL_SEC, 0.0f, 1.0f);
+        laser.position = lerpVector2(gLaserOrigin, gLaserTarget, t);
+        laser.rotation = gLaserAngle;
+
+        if (t >= 1.0f) {
+            gLaserInFlight = false;
+            laser.position.x = -SCREEN_SIZE.x;
+
+            gExplosionStarted = true;
+            gExplosionStartSec = nowSec;
+            explosion.position = gLaserTarget;
+        }
+    }
+
+    if (gExplosionStarted) {
+        auto& explosion = gObjects[SceneObject::EXPLOSION];
+
+        float t = clamp((nowSec - gExplosionStartSec) / EXPLOSION_LINGER_SEC, 0.0f, 1.0f);
+
+        // Shift the explosion off the screen to create effect of driving away
+        explosion.position.x -= BACKGROUND_SCROLL_SPEEDS[SceneObject::ROAD - SceneObject::TREES_BG]
+            * gBackgroundScrollSpeedMultiplier * deltaTime;
+
+        // Explosion scaling and fading
+        float scale = lerp(EXPLOSION_MIN_SCALE, EXPLOSION_MAX_SCALE, t);
+        explosion.size = {EXPLOSION_SIZE.x * scale, EXPLOSION_SIZE.y * scale};
+        explosion.tint.a = lerp(255, 255 / 2, t);
+        explosion.rotation = 180 / PI * std::cos(nowSec * 25);
+
+        if (t >= 1.0f) {
+            gExplosionStarted = false;
+            explosion.position.x = -SCREEN_SIZE.x;
+        }
+    }
 }
 
 void render(void) {
     BeginDrawing();
 
-    ClearBackground(SKYBLUE);
+    ClearBackground(gBackgroundColor);
 
     for (const auto& object : gObjects) {
         Rectangle textureArea =
