@@ -84,11 +84,12 @@ constexpr float UFO_BASE_ANGLE = -15.0f;
 
 // Laser
 constexpr float LASER_TRAVEL_SEC = 0.6f;
-constexpr float LASER_FIRE_PROGRESS = 0.5f;
+constexpr float LASER_FIRE_PROGRESS = 0.75f;
+constexpr float LASER_TARGET_X = 650.0f;
 
 // Explosion
 constexpr Vector2 EXPLOSION_SIZE = {200.0f, 200.0f};
-constexpr float EXPLOSION_MIN_SCALE = 0.5f;
+constexpr float EXPLOSION_MIN_SCALE = 0.8f;
 constexpr float EXPLOSION_MAX_SCALE = 2.0f;
 constexpr float EXPLOSION_LINGER_SEC = 0.85f;
 
@@ -292,8 +293,8 @@ void update(void) {
                 gLaserFiredThisCycle = true;
                 gLaserInFlight = true;
                 gLaserStartSec = nowSec;
-                gLaserTarget = {550.0f, car.position.y};
-                gLaserOrigin = {ufo.position.x, ufo.position.y};
+                gLaserTarget = {LASER_TARGET_X, car.position.y};
+                gLaserOrigin = ufo.position; // It'll look weird spawning inside
 
                 gLaserAngle =
                     std::atan2(gLaserTarget.y - gLaserOrigin.y, gLaserTarget.x - gLaserOrigin.x)
@@ -364,7 +365,7 @@ void update(void) {
         float scale = lerp(EXPLOSION_MIN_SCALE, EXPLOSION_MAX_SCALE, t);
         explosion.size = {EXPLOSION_SIZE.x * scale, EXPLOSION_SIZE.y * scale};
         explosion.tint.a = lerp(255, 255 / 2, t);
-        explosion.rotation = 180 / PI * std::cos(nowSec * 25);
+        explosion.rotation = 180 / PI * std::cos(nowSec * 10);
 
         if (t >= 1.0f) {
             gExplosionStarted = false;
