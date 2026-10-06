@@ -29,6 +29,10 @@ constexpr Vector2 lerpVector2(Vector2 a, Vector2 b, float t) {
     return Vector2 {lerp(a.x, b.x, t), lerp(a.y, b.y, t)};
 }
 
+constexpr float remap(float value, float start, float end) {
+    return clamp((value - start) / (end - start), 0.0f, 1.0f);
+}
+
 enum AppStatus { TERMINATED, RUNNING };
 
 Color ColorFromHex(const char* hex);

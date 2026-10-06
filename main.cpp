@@ -29,11 +29,12 @@ constexpr Vector2 SCREEN_SIZE = {
 namespace SceneObject {
 
 // There can be only one of each scene object, and they're loaded in the order of declaration here.
-enum Type { SUN, TREES_BG, TREES_MG, TREES_FG, ROAD, CAR, UFO, LASER, EXPLOSION, COUNT };
+enum Type { SUN, STARS, TREES_BG, TREES_MG, TREES_FG, ROAD, CAR, UFO, LASER, EXPLOSION, COUNT };
 } // namespace SceneObject
 
 constexpr std::array<const char*, SceneObject::COUNT> TEXTURE_PATHS = {
     "assets/sun.png",
+    "assets/stars.png",
     "assets/trees-background.png",
     "assets/trees-midground.png",
     "assets/trees-foreground.png",
@@ -45,23 +46,41 @@ constexpr std::array<const char*, SceneObject::COUNT> TEXTURE_PATHS = {
 };
 
 namespace Event {
-enum Type { DAY, NIGHT, UFO_ENTRANCE, UFO_EXIT, COUNT };
+enum Type { DAY, NIGHT, UFO_ENTRANCE, UFO_EXIT, SUNRISE, COUNT };
 }
 
-constexpr float EVENT_CYCLE_LENGTH = 17.0f;
-constexpr float EVENT_TIMESTAMPS[] = {0.0f, 5.0f, 8.0f, 14.0f, EVENT_CYCLE_LENGTH};
+constexpr float EVENT_CYCLE_LENGTH = 21.0f;
+constexpr float EVENT_TIMESTAMPS[] = {0.0f, 5.0f, 8.0f, 14.0f, 16.0f, EVENT_CYCLE_LENGTH};
 
 constexpr Color DAY_BG_COLOR = SKYBLUE;
 constexpr Color SUNSET_BG_COLOR = ORANGE;
 constexpr Color NIGHT_BG_COLOR = BLACK;
+
+// Sun lingers until this timestamp, then sets
+constexpr float SUNSET_BEGIN = 0.5f;
+
+// Sky fades to black by this timestamp, then stars fade in
+constexpr float NIGHT_FADE_END = 0.5f;
+
+// UFO finishes flying to its fire position by this timestamp
+constexpr float UFO_ARRIVE_END = 0.5f;
+constexpr float LASER_FIRE_BEGIN = 0.75f; // Laser's fired here
+
+// UFO finishes leaving by this timestamp
+constexpr float UFO_LEAVE_END = 0.5f;
+
+// Stars fade out
+constexpr float SUNRISE_STARS_END = 0.3f;
+constexpr float SUNRISE_GLOW_END = 0.6f; // Black -> orange
+// Orange -> blue, sun rises
 
 // =============================================================================
 // Object-specific constants
 // =============================================================================
 
 // Parallax backgrounds
-constexpr int32_t BACKGROUND_LAYER_COUNT = 4;
-constexpr float BACKGROUND_SCROLL_SPEEDS[] = {15.0f, 25.0f, 45.0f, 90.0f};
+constexpr int32_t BACKGROUND_LAYER_COUNT = 5;
+constexpr float BACKGROUND_SCROLL_SPEEDS[] = {7.5f, 15.0f, 25.0f, 45.0f, 90.0f};
 constexpr float BACKGROUND_Y_OFFSET = 100.0f;
 
 constexpr float NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER = 8.0f;
@@ -75,7 +94,6 @@ constexpr Vector2 SUN_SIZE = {250.0f, 250.0f};
 constexpr float SUN_Y = 125.0f;
 constexpr float SUN_HIDDEN_Y = 400.0f;
 constexpr float SUN_HIDDEN_SCALE = 0.25f;
-constexpr float SUN_LINGER_FRACTION = 0.5f; // Portion of the event spent sitting still
 
 // UFO
 constexpr float UFO_ACTIVE_X = 350.0f;
@@ -84,7 +102,6 @@ constexpr float UFO_BASE_ANGLE = -15.0f;
 
 // Laser
 constexpr float LASER_TRAVEL_SEC = 0.6f;
-constexpr float LASER_FIRE_PROGRESS = 0.75f;
 constexpr float LASER_TARGET_X = 650.0f;
 
 // Explosion
@@ -92,6 +109,8 @@ constexpr Vector2 EXPLOSION_SIZE = {200.0f, 200.0f};
 constexpr float EXPLOSION_MIN_SCALE = 0.8f;
 constexpr float EXPLOSION_MAX_SCALE = 2.0f;
 constexpr float EXPLOSION_LINGER_SEC = 0.85f;
+
+constexpr int32_t STARS_MAX_ALPHA = 200;
 
 // =============================================================================
 // App-level globals
@@ -127,7 +146,7 @@ std::vector<Object> gObjects;
 // =============================================================================
 
 // Parallax background UV offsets
-float gBackgroundOffsets[] = {0.0f, 0.0f, 0.0f, 0.0f};
+float gBackgroundOffsets[] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 float gBackgroundScrollSpeedMultiplier = 1.0f;
 
 bool gLaserFiredThisCycle = false; // Once-per-cycle guard
@@ -169,10 +188,16 @@ void initialize(void) {
     // Initialize scene objects
 
     // Parallax backgrounds take up the entire screen. Also shift them down a bit.
-    for (int32_t i = SceneObject::TREES_BG; i <= SceneObject::ROAD; ++i) {
+    for (int32_t i = SceneObject::STARS; i <= SceneObject::ROAD; ++i) {
         gObjects[i].size = SCREEN_SIZE;
         gObjects[i].position.y += BACKGROUND_Y_OFFSET;
     }
+
+    // Stars start off fully transparent
+    auto& stars = gObjects[SceneObject::STARS];
+    stars.tint.a = 0;
+    stars.position.y = SCREEN_CENTER.y;
+    stars.uvSize = SCREEN_SIZE;
 
     auto& road = gObjects[SceneObject::ROAD];
     road.position.y += ROAD_Y_OFFSET;
@@ -238,8 +263,8 @@ void update(void) {
     gPreviousTimestampSec = nowSec;
 
     // Parallax scroll
-    for (int32_t i = SceneObject::TREES_BG; i <= SceneObject::ROAD; ++i) {
-        int32_t layer = i - SceneObject::TREES_BG;
+    for (int32_t i = SceneObject::STARS; i <= SceneObject::ROAD; ++i) {
+        int32_t layer = i - SceneObject::STARS;
 
         gBackgroundOffsets[layer] +=
             BACKGROUND_SCROLL_SPEEDS[layer] * gBackgroundScrollSpeedMultiplier * deltaTime;
@@ -251,6 +276,9 @@ void update(void) {
     auto& car = gObjects[SceneObject::CAR];
     auto& sun = gObjects[SceneObject::SUN];
     auto& ufo = gObjects[SceneObject::UFO];
+    auto& stars = gObjects[SceneObject::STARS];
+
+    const float p = gCurrentEvent.progress;
 
     switch (gCurrentEvent.id) {
         case (Event::DAY): {
@@ -258,71 +286,79 @@ void update(void) {
             gBackgroundScrollSpeedMultiplier = 1.0f;
 
             // Begin sunset sequence
-            float t = (gCurrentEvent.progress - SUN_LINGER_FRACTION) / (1.0f - SUN_LINGER_FRACTION);
-            setSunHiddenAmount(sun, clamp(t, 0.0f, 1.0f));
-            gBackgroundColor = lerpColor(DAY_BG_COLOR, SUNSET_BG_COLOR, clamp(t, 0.0f, 1.0f));
+            float setT = remap(p, SUNSET_BEGIN, 1.0f);
+            setSunHiddenAmount(sun, setT);
+            gBackgroundColor = lerpColor(DAY_BG_COLOR, SUNSET_BG_COLOR, setT);
 
             break;
         }
         case (Event::NIGHT): {
-            setSunHiddenAmount(sun, 1.0f);
+            float fadeT = remap(p, 0.0f, NIGHT_FADE_END);
+            float starsT = remap(p, NIGHT_FADE_END, 1.0f);
 
-            // Fade to black
-            gBackgroundColor = lerpColor(
-                SUNSET_BG_COLOR,
-                NIGHT_BG_COLOR,
-                clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f)
-            );
+            setSunHiddenAmount(sun, 1.0f);
+            gBackgroundColor = lerpColor(SUNSET_BG_COLOR, NIGHT_BG_COLOR, fadeT);
+            stars.tint.a = lerp(0, STARS_MAX_ALPHA, starsT);
 
             break;
         }
         case (Event::UFO_ENTRANCE): {
+            float arriveT = remap(p, 0.0f, UFO_ARRIVE_END);
+
             // Ramp up scroll speed
-            gBackgroundScrollSpeedMultiplier = lerp(
-                1.0f,
-                NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER,
-                clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f)
-            );
+            gBackgroundScrollSpeedMultiplier =
+                lerp(1.0f, NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER, arriveT);
 
-            // Move the UFO to firing position
-            ufo.position.x =
-                lerp(-ufo.size.x, UFO_ACTIVE_X, clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f));
+            // UFO moves to position
+            ufo.position.x = lerp(-ufo.size.x, UFO_ACTIVE_X, arriveT);
 
-            // UFO's there; select a target and fire a laser
-            if (gCurrentEvent.progress > LASER_FIRE_PROGRESS && !gLaserFiredThisCycle) {
+            // Fire the laser
+            if (p > LASER_FIRE_BEGIN && !gLaserFiredThisCycle) {
                 gLaserFiredThisCycle = true;
                 gLaserInFlight = true;
                 gLaserStartSec = nowSec;
                 gLaserTarget = {LASER_TARGET_X, car.position.y};
-                gLaserOrigin = ufo.position; // It'll look weird spawning inside
-
+                gLaserOrigin = ufo.position;
                 gLaserAngle =
                     std::atan2(gLaserTarget.y - gLaserOrigin.y, gLaserTarget.x - gLaserOrigin.x)
                     * 180.0f / PI;
             }
 
-            // Keep the sun hidden and the skies dark
             setSunHiddenAmount(sun, 1.0f);
             gBackgroundColor = NIGHT_BG_COLOR;
+            stars.tint.a = STARS_MAX_ALPHA;
 
             break;
         }
         case (Event::UFO_EXIT): {
-            // Ramp down scroll speed
-            gBackgroundScrollSpeedMultiplier = lerp(
-                NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER,
-                1.0f,
-                clamp(gCurrentEvent.progress, 0.0f, 1.0f)
-            );
+            float leaveT = remap(p, 0.0f, UFO_LEAVE_END);
 
-            // UFO flies off-screen
-            ufo.position.x =
-                lerp(UFO_ACTIVE_X, -ufo.size.x, clamp(gCurrentEvent.progress * 2, 0.0f, 1.0f));
+            // Scroll speed eases back down
+            gBackgroundScrollSpeedMultiplier =
+                lerp(NIGHT_BACKGROUND_SCROLL_SPEED_MULTIPLIER, 1.0f, p);
 
-            // The sun rises and saves the day
-            float t = gCurrentEvent.progress / (1.0f - SUN_LINGER_FRACTION);
-            setSunHiddenAmount(sun, 1.0f - clamp(t, 0.0f, 1.0f));
-            gBackgroundColor = lerpColor(NIGHT_BG_COLOR, DAY_BG_COLOR, clamp(t, 0.0f, 1.0f));
+            // UFO leaves the scene
+            ufo.position.x = lerp(UFO_ACTIVE_X, -ufo.size.x, leaveT);
+
+            setSunHiddenAmount(sun, 1.0f);
+            gBackgroundColor = NIGHT_BG_COLOR;
+            stars.tint.a = static_cast<unsigned char>(STARS_MAX_ALPHA);
+
+            break;
+        }
+        case (Event::SUNRISE): {
+            float p = gCurrentEvent.progress;
+            float starsT = remap(p, 0.0f, SUNRISE_STARS_END);
+            float glowT = remap(p, SUNRISE_STARS_END, SUNRISE_GLOW_END);
+            float riseT = remap(p, SUNRISE_GLOW_END, 1.0f);
+
+            stars.tint.a = lerp(STARS_MAX_ALPHA, 0, starsT);
+
+            gBackgroundColor = (p < SUNRISE_GLOW_END)
+                ? lerpColor(NIGHT_BG_COLOR, SUNSET_BG_COLOR, glowT)
+                : lerpColor(SUNSET_BG_COLOR, DAY_BG_COLOR, riseT);
+
+            setSunHiddenAmount(sun, 1.0f - riseT);
 
             break;
         }
@@ -358,7 +394,7 @@ void update(void) {
         float t = clamp((nowSec - gExplosionStartSec) / EXPLOSION_LINGER_SEC, 0.0f, 1.0f);
 
         // Shift the explosion off the screen to create effect of driving away
-        explosion.position.x -= BACKGROUND_SCROLL_SPEEDS[SceneObject::ROAD - SceneObject::TREES_BG]
+        explosion.position.x -= BACKGROUND_SCROLL_SPEEDS[SceneObject::ROAD - SceneObject::STARS]
             * gBackgroundScrollSpeedMultiplier * deltaTime;
 
         // Explosion scaling and fading
